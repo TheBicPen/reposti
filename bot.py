@@ -67,19 +67,75 @@ def image_hash_from_message(message):
     return out
 
 
-async def scan_channel(channel, data, history_args):
+def num_in_ranges(ranges, num: int):
+    """
+    Returns whether a number is in a list of sorted ranges.
+    """
+    if len(ranges) > 1:
+        if num < ranges[len(ranges) // 2][0]:
+            return num_in_ranges(ranges[:len(ranges) // 2], num)
+        else:
+            return num_in_ranges(ranges[len(ranges) // 2:], num)
+    elif len(ranges) == 1:
+        return num >= ranges[0][0] and num <= ranges[0][1]
+    else:
+        return False
+
+
+def add_range(ranges, new_range: tuple):
+    """
+    Adds a range to a list of ranges
+    """
+    min_i = None
+    max_i = None
+    # extend a range to the union of the new range and the nearest overlap
+    for i, r in enumerate(ranges):
+        if r[0] <= new_range[0] and new_range[0] <= r[1] or new_range[0] <= r[0] and r[0] <= new_range[1] and min_i is None:
+            r[0] = min(r[0], new_range[0])
+            min_i = i
+        if r[0] <= new_range[1] and new_range[1] <= r[1] or new_range[0] <= r[1] and r[1] <= new_range[1]:
+            ranges[min_i][1] = max(r[1], new_range[1])
+            max_i = i
+    # if there is no overlap, insert the new range
+    if min_i is None and max_i is None:
+        for i, r in enumerate(ranges):
+            if new_range[1] < r[0]:
+                ranges.insert(i, list(new_range))
+                break
+        else:
+            ranges.append(list(new_range))
+    else:
+        # pop all ranges between the min and max of the new range
+        for i in range(min_i + 1, max_i + 1):
+            ranges.pop(min_i + 1)
+
+
+async def scan_channel(channel, data, history_args, until_message=None):
     print(
         f"Scanning '#{channel.name}', {'all' if history_args.get('limit') is None else history_args['limit']} posts")
     await channel.send("Scanning posts...")
+    skipped_posts = 0
     scanned_posts = 0
     images_found = 0
     image_errors = 0
     hashes = {}
+    first_message = None
+    last_message = None
+    scanned_ranges = get_guild_data(
+        data, channel.guild, "scanned_posts", default={}).get(str(channel.id), [])  # keys are stored as strings
     async with channel.typing():
         async for m in channel.history(**history_args):
-            if scanned_posts % 100 == 0:
-                print(f"Scanned {scanned_posts} posts in '#{channel.name}'")
-                # , m.jump_url)
+            if until_message and m.id == until_message:
+                break
+            if (scanned_posts + skipped_posts) % 100 == 0:
+                if scanned_posts + skipped_posts == 0:
+                    first_message = m.id
+                print(
+                    f"Scanned {scanned_posts} posts in '#{channel.name}'", m.jump_url)
+            last_message = m.id
+            if num_in_ranges(scanned_ranges, m.id):
+                skipped_posts += 1
+                continue
             embeds = image_hash_from_message(m)
             for h in embeds["hashes"]:
                 if h in hashes:
@@ -91,9 +147,21 @@ async def scan_channel(channel, data, history_args):
             image_errors += embeds["errors"]
             scanned_posts += 1
     add_hash_data(data, channel.guild, hashes)
+    if last_message:
+        add_scanned_range(data, channel, (first_message, last_message))
     print(
-        f"Done. Scanned {scanned_posts} posts, found {len(hashes)} unique images, {image_errors} errors.")
-    await channel.send(f"Done. Scanned {scanned_posts} posts, found {len(hashes)} unique images, {image_errors} errors.")
+        f"Done. Scanned {scanned_posts}/{scanned_posts + skipped_posts} posts, found {len(hashes)} unique images, {image_errors} errors.")
+    await channel.send(f"Done. Scanned {scanned_posts}/{scanned_posts + skipped_posts} posts, found {len(hashes)} unique images, {image_errors} errors.")
+
+
+def add_scanned_range(data, channel, message_range: tuple):
+    message_range = (min(message_range), max(message_range))
+    channels = get_guild_data(data, channel.guild, "scanned_posts", default={})
+    channel_id = str(channel.id)  # since JSON can only use strings as keys
+    if str(channel_id) not in channels:
+        channels[channel_id] = []
+    add_range(channels[channel_id], message_range)
+    set_guild_data(data, channel.guild, "scanned_posts", channels)
 
 
 def save_guild_data(data, guild):
@@ -110,6 +178,16 @@ def get_guild_data(data, guild, k, default=None):
 def set_guild_data(data, guild, k, v):
     guild_name, _ = unique_guild_data(guild)
     data[guild_name][k] = v
+    save_guild_data(data, guild)
+
+
+def del_guild_data(data, guild, k, raise_error=True):
+    guild_name, _ = unique_guild_data(guild)
+    try:
+        del data[guild_name][k]
+    except KeyError as e:
+        if raise_error:
+            raise e
     save_guild_data(data, guild)
 
 
@@ -184,6 +262,10 @@ def check_message(data, message, max_diff=0):
 
 class Client(discord.Client):
 
+    def __init__(self):
+        super().__init__()
+        self.command_strings = default_strings.copy()
+
     def check_command(self, message, command):
         return message.content.startswith(self.command_strings[command])
 
@@ -192,7 +274,6 @@ class Client(discord.Client):
 
     async def on_ready(self):
         print('We have logged in as {0.user}'.format(client))
-        self.command_strings = default_strings.copy()
         self.data = await load_data(client)
 
     async def on_message(self, message):
@@ -206,17 +287,25 @@ class Client(discord.Client):
                 await message.reply('Hello there')
             elif self.check_command(message, "scan"):
                 history_args = {
-                    "limit": None
+                    "limit": None,
+                    # "oldest_first": True
                 }
                 channels = [message.channel]
+                force_rescan = False
                 for w in self.get_args(message, "scan"):
                     if w.isdecimal():
                         history_args["limit"] = int(w)
-                    elif w == "here":
+                    elif w == "now":
                         history_args["before"] = message
+                        # history_args["oldest_first"] = None
                     elif w == "all":
                         channels = message.guild.channels
+                    elif w == "rescan":
+                        force_rescan = True
                 for channel in channels:
+                    if force_rescan:
+                        del_guild_data(self.data, message.guild,
+                                       "scanned_ranges")
                     await scan_channel(channel, self.data, history_args)
 
             elif self.check_command(message, "hash"):
@@ -300,7 +389,7 @@ class Client(discord.Client):
                                "included_channels", channels)
                 await message.reply("Checking the following channels for reposts:" + ", ".join([str(message.guild.get_channel(c)) for c in channels]))
 
-        if message.channel.id in get_guild_data(self.data, message.guild, "included_channels") and (match := check_message(self.data, message, SAME_DIFF)):
+        if message.channel.id in get_guild_data(self.data, message.guild, "included_channels", []) and (match := check_message(self.data, message, SAME_DIFF)):
             jump = None
             try:
                 channel = message.guild.get_channel(match[0][0])
@@ -310,11 +399,12 @@ class Client(discord.Client):
                 await message.reply(self.command_strings["repost_found"] + (jump if jump else ""))
 
 
-client = Client()
+if __name__ == '__main__':
+    client = Client()
 
-token = environ.get("REPOSTI_DISCORD_TOKEN")
-if token:
-    client.run(token)
-else:
-    print("No Discord token found. Run the image with the correct environment variable set.")
-    exit("")
+    token = environ.get("REPOSTI_DISCORD_TOKEN")
+    if token:
+        client.run(token)
+    else:
+        print("No Discord token found. Run the image with the correct environment variable set.")
+        exit("")
