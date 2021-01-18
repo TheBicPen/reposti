@@ -273,8 +273,11 @@ class Client(discord.Client):
         return message.content[len(self.command_strings[command]):].split()
 
     async def on_ready(self):
-        print('We have logged in as {0.user}'.format(client))
-        self.data = await load_data(client)
+        print('We have logged in as {0.user}'.format(self))
+        self.data = await load_data(self)
+
+    async def on_guild_join(self, guild):
+        self.data = await load_data(self)
 
     async def on_message(self, message):
         if message.author == client.user:
