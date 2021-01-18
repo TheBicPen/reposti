@@ -123,30 +123,29 @@ async def scan_channel(channel, data, history_args, until_message=None, force_re
     last_message = None
     scanned_ranges = get_guild_data(
         data, channel.guild, "scanned_ranges", default={}).get(str(channel.id), [])  # keys are stored as strings
-    async with channel.typing():
-        async for m in channel.history(**history_args):
-            if until_message and m.id == until_message:
-                break
-            if (posts_scanned + posts_skipped) % 100 == 0:
-                if posts_scanned + posts_skipped == 0:
-                    first_message = m.id
-                else:
-                    print(
-                        f"Scanned {posts_scanned} posts in '#{channel.name}'", m.jump_url)
-            last_message = m.id
-            if not force_rescan and num_in_ranges(scanned_ranges, m.id):
-                posts_skipped += 1
-                continue
-            embeds = image_hash_from_message(m)
-            for h in embeds["hashes"]:
-                if h in hashes:
-                    hashes[h].append((channel.id, m.id))
-                else:
-                    hashes[h] = [(channel.id, m.id)]
+    async for m in channel.history(**history_args):
+        if until_message and m.id == until_message:
+            break
+        if (posts_scanned + posts_skipped) % 100 == 0:
+            if posts_scanned + posts_skipped == 0:
+                first_message = m.id
+            else:
+                print(
+                    f"Scanned {posts_scanned}/{posts_scanned + posts_skipped} posts in '#{channel.name}'", m.jump_url)
+        last_message = m.id
+        if not force_rescan and num_in_ranges(scanned_ranges, m.id):
+            posts_skipped += 1
+            continue
+        embeds = image_hash_from_message(m)
+        for h in embeds["hashes"]:
+            if h in hashes:
+                hashes[h].append((channel.id, m.id))
+            else:
+                hashes[h] = [(channel.id, m.id)]
 
-            images_found += len(embeds["hashes"]) + embeds["errors"]
-            image_errors += embeds["errors"]
-            posts_scanned += 1
+        images_found += len(embeds["hashes"]) + embeds["errors"]
+        image_errors += embeds["errors"]
+        posts_scanned += 1
     add_hash_data(data, channel.guild, hashes)
     if last_message:
         add_scanned_range(data, channel, (first_message, last_message))
@@ -326,12 +325,13 @@ class Client(discord.Client):
                         force_rescan = True
                 if mentions := message.channel_mentions:
                     channels = mentions
-                await message.channel.send("Scanning posts...")
-                for channel in channels:
-                    scan_info = await scan_channel(channel, self.data, history_args, force_rescan=force_rescan)
-                    info_str = f"Done. Scanned {scan_info[0]}/{scan_info[0] + scan_info[1]} posts in #{channel.name}, found {scan_info[2]} unique images, {scan_info[3]} errors."
-                    print(info_str)
-                    await message.channel.send(info_str)
+                async with message.channel.typing():
+                    await message.channel.send("Scanning posts...")
+                    for channel in channels:
+                        scan_info = await scan_channel(channel, self.data, history_args, force_rescan=force_rescan)
+                        info_str = f"Done. Scanned {scan_info[0]}/{scan_info[0] + scan_info[1]} posts in #{channel.name}, found {scan_info[2]} unique images, {scan_info[3]} errors."
+                        print(info_str)
+                        await message.channel.send(info_str)
 
             elif self.check_command(message, "hash"):
                 if message.reference:
