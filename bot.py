@@ -12,6 +12,7 @@ HASH_SIZE = 16
 
 default_strings = {
     "scan": "reposti scan",
+    "clear": "reposti scanclear",
     # "scan_all": "reposti !scanall",
     "disable": "reposti disable",
     "enable": "reposti enable",
@@ -113,7 +114,6 @@ def add_range(ranges, new_range: tuple):
 async def scan_channel(channel, data, history_args, until_message=None, force_rescan=False):
     print(
         f"Scanning '#{channel.name}', {'all' if history_args.get('limit') is None else history_args['limit']} posts")
-    await channel.send("Scanning posts...")
     posts_skipped = 0
     posts_scanned = 0
     images_found = 0
@@ -130,8 +130,9 @@ async def scan_channel(channel, data, history_args, until_message=None, force_re
             if (posts_scanned + posts_skipped) % 100 == 0:
                 if posts_scanned + posts_skipped == 0:
                     first_message = m.id
-                print(
-                    f"Scanned {posts_scanned} posts in '#{channel.name}'", m.jump_url)
+                else:
+                    print(
+                        f"Scanned {posts_scanned} posts in '#{channel.name}'", m.jump_url)
             last_message = m.id
             if not force_rescan and num_in_ranges(scanned_ranges, m.id):
                 posts_skipped += 1
@@ -149,9 +150,7 @@ async def scan_channel(channel, data, history_args, until_message=None, force_re
     add_hash_data(data, channel.guild, hashes)
     if last_message:
         add_scanned_range(data, channel, (first_message, last_message))
-    print(
-        f"Done. Scanned {posts_scanned}/{posts_scanned + posts_skipped} posts, found {len(hashes)} unique images, {image_errors} errors.")
-    await channel.send(f"Done. Scanned {posts_scanned}/{posts_scanned + posts_skipped} posts, found {len(hashes)} unique images, {image_errors} errors.")
+    return posts_scanned, posts_skipped, len(hashes), image_errors
 
 
 def add_scanned_range(data, channel, message_range: tuple):
@@ -286,6 +285,25 @@ class Client(discord.Client):
             if self.check_command(message, "hello"):
                 print("Hello there")
                 await message.reply('Hello there')
+
+            elif self.check_command(message, "clear"):
+                if args := self.get_args(message, "clear"):
+                    if args[0] == "all":
+                        channels = message.guild.channels
+                    else:
+                        channels = message.channel_mentions
+                else:
+                    channels = [message.channel]
+                scanned_channels = get_guild_data(
+                    self.data, message.guild, "scanned_ranges")
+                for channel in channels:
+                    try:
+                        del scanned_channels[str(channel.id)]
+                    except KeyError:
+                        pass
+                save_guild_data(self.data, message.channel.guild)
+                await message.reply("Removed scan cache for: " + ", ".join([c.name for c in channels]))
+
             elif self.check_command(message, "scan"):
                 history_args = {
                     "limit": None,
@@ -293,7 +311,6 @@ class Client(discord.Client):
                 }
                 channels = [message.channel]
                 force_rescan = False
-                clear = False
                 for w in self.get_args(message, "scan"):
                     if w.isdecimal():
                         history_args["limit"] = int(w)
@@ -304,15 +321,14 @@ class Client(discord.Client):
                         channels = message.guild.channels
                     elif w == "rescan":
                         force_rescan = True
-                    elif w == "clear":
-                        clear = True
-                if clear:
-                    scanned_channels = get_guild_data(
-                        self.data, message.guild, "scanned_ranges")
+                if mentions := message.channel_mentions:
+                    channels = mentions
+                await message.channel.send("Scanning posts...")
                 for channel in channels:
-                    if clear:
-                        del scanned_channels[str(channel.id)]
-                    await scan_channel(channel, self.data, history_args, force_rescan=force_rescan)
+                    scan_info = await scan_channel(channel, self.data, history_args, force_rescan=force_rescan)
+                    info_str = f"Done. Scanned {scan_info[0]}/{scan_info[0] + scan_info[1]} posts in #{channel.name}, found {scan_info[2]} unique images, {scan_info[3]} errors."
+                    print(info_str)
+                    await message.channel.send(info_str)
 
             elif self.check_command(message, "hash"):
                 if message.reference:
